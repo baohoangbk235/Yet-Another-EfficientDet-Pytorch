@@ -5,7 +5,7 @@ import os
 import uuid
 from glob import glob
 from typing import Union
-
+import json
 import cv2
 import numpy as np
 import torch
@@ -13,7 +13,8 @@ import webcolors
 from torch import nn
 from torch.nn.init import _calculate_fan_in_and_fan_out, _no_grad_normal_
 from torchvision.ops.boxes import batched_nms
-
+from PIL import Image, ImageDraw, ImageFont
+FONT_PATH = "../../fonts/arial.ttf"
 from utils.sync_batchnorm import SynchronizedBatchNorm2d
 
 
@@ -67,6 +68,7 @@ def aspectaware_resize_padding(image, width, height, interpolation=None, means=N
 
 def preprocess(*image_path, max_size=512, mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)):
     ori_imgs = [cv2.imread(img_path)[..., ::-1] for img_path in image_path]
+    
     normalized_imgs = [(img / 255 - mean) / std for img in ori_imgs]
     imgs_meta = [aspectaware_resize_padding(img, max_size, max_size,
                                             means=None) for img in normalized_imgs]
@@ -128,7 +130,9 @@ def postprocess(x, anchors, regression, classification, regressBoxes, clipBoxes,
     return out
 
 
-def display(preds, imgs, obj_list, imshow=True, imwrite=False):
+def display(img_id, preds, imgs, obj_list, imshow=True, imwrite=False):
+    all_objs_json = []
+
     for i in range(len(imgs)):
         if len(preds[i]['rois']) == 0:
             continue
@@ -136,11 +140,19 @@ def display(preds, imgs, obj_list, imshow=True, imwrite=False):
         imgs[i] = imgs[i].copy()
 
         for j in range(len(preds[i]['rois'])):
-            (x1, y1, x2, y2) = preds[i]['rois'][j].astype(np.int)
+            obj_json = {}
+            (x1, y1, x2, y2) = preds[i]['rois'][j].astype(np.float)
             obj = obj_list[preds[i]['class_ids'][j]]
             score = float(preds[i]['scores'][j])
 
-            plot_one_box(imgs[i], [x1, y1, x2, y2], label=obj, score=score,
+            obj_json["image_id"] = int(img_id)
+            obj_json["category_id"] = get_index_label(obj, obj_list) + 1
+            obj_json["bbox"] = [x1, y1, x2-x1, y2-y1]
+            obj_json["score"] = score
+
+            all_objs_json.append(obj_json)
+
+            imgs[i] = plot_one_box(imgs[i], [int(x1), int(y1), int(x2), int(y2)], label=obj, score=score,
                          color=color_list[get_index_label(obj, obj_list)])
         if imshow:
             cv2.imshow('img', imgs[i])
@@ -148,7 +160,9 @@ def display(preds, imgs, obj_list, imshow=True, imwrite=False):
 
         if imwrite:
             os.makedirs('test/', exist_ok=True)
-            cv2.imwrite(f'test/{uuid.uuid4().hex}.jpg', imgs[i])
+            cv2.imwrite(f'test/{uuid.uuid4().hex}.jpg', imgs[i][:,:,::-1])
+
+    return all_objs_json
 
 
 def replace_w_sync_bn(m):
@@ -295,15 +309,22 @@ def plot_one_box(img, coord, label=None, score=None, color=None, line_thickness=
     color = color
     c1, c2 = (int(coord[0]), int(coord[1])), (int(coord[2]), int(coord[3]))
     cv2.rectangle(img, c1, c2, color, thickness=tl)
+        # tf = max(tl - 2, 1)  # font thickness
+        # s_size = cv2.getTextSize(str('{:.0%}'.format(score)), 0, fontScale=float(tl) / 3, thickness=tf)[0]
+        # t_size = cv2.getTextSize(label, 0, fontScale=float(tl) / 3, thickness=tf)[0]
+        # c2 = c1[0] + t_size[0] + s_size[0] + 15, c1[1] - t_size[1] - 3
+        # cv2.rectangle(img, c1, c2, color, -1)  # filled
+        # cv2.putText(img, '{}: {:.0%}'.format(label, score), (c1[0], c1[1] - 2), 0, float(tl) / 3, [0, 0, 0],
+            #             thickness=tf, lineType=cv2.FONT_HERSHEY_SIMPLEX)
     if label:
-        tf = max(tl - 2, 1)  # font thickness
-        s_size = cv2.getTextSize(str('{:.0%}'.format(score)), 0, fontScale=float(tl) / 3, thickness=tf)[0]
-        t_size = cv2.getTextSize(label, 0, fontScale=float(tl) / 3, thickness=tf)[0]
-        c2 = c1[0] + t_size[0] + s_size[0] + 15, c1[1] - t_size[1] - 3
-        cv2.rectangle(img, c1, c2, color, -1)  # filled
-        cv2.putText(img, '{}: {:.0%}'.format(label, score), (c1[0], c1[1] - 2), 0, float(tl) / 3, [0, 0, 0],
-                    thickness=tf, lineType=cv2.FONT_HERSHEY_SIMPLEX)
+        img_pil = Image.fromarray(img)
+        font = ImageFont.truetype(FONT_PATH, size=15)
+        draw = ImageDraw.Draw(img_pil)
 
+        draw.text((c1[0], c1[1]-25), "{}: {}".format(label, score),
+                    font=font, fill=(0, 255, 0))
+        img = np.array(img_pil)
+    return img 
 
 color_list = standard_to_bgr(STANDARD_COLORS)
 
